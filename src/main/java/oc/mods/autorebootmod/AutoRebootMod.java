@@ -54,6 +54,7 @@ public class AutoRebootMod implements ModInitializer {
 		LOGGER.info("[AutoReboot] Initializing professional reboot system...");
 		loadAllConfigs();
 
+		// Запрещаем вход новым игрокам, если идет процесс перезагрузки
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			if (rebootPending) {
 				handler.disconnect(Text.literal(getMsg("kick_reason")));
@@ -62,10 +63,9 @@ public class AutoRebootMod implements ModInitializer {
 
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
 			dispatcher.register(CommandManager.literal("reboot")
-					// 1. Делаем корень доступным для всех (level 0)
 					.requires(source -> source.hasPermissionLevel(0))
 
-					// 2. Подкоманда INFO (наследует level 0)
+					// INFO: Статус перезагрузки
 					.then(CommandManager.literal("info")
 							.executes(context -> {
 								context.getSource().sendFeedback(() -> Text.literal(getDetailedInfo()), false);
@@ -73,18 +73,41 @@ public class AutoRebootMod implements ModInitializer {
 							})
 					)
 
-					// 3. Подкоманда RELOAD (явно ставим level 4)
+					// RELOAD: Перезагрузка конфигов с обнулением таймера
 					.then(CommandManager.literal("reload")
 							.requires(source -> source.hasPermissionLevel(4))
 							.executes(context -> {
 								loadAllConfigs();
+								ticksSinceStart = 0;
+								processedWarnings.clear();
 								context.getSource().sendFeedback(() -> Text.literal(getMsg("reload_success")), true);
 								return 1;
 							})
 					)
 
-					// 4. Основное действие команды /reboot (запуск рестарта)
-					// Проверяем права ВНУТРИ executes, чтобы команда была видна, но не работала у игроков
+					// STOP / CANCEL: Остановка процесса перезагрузки
+					.then(CommandManager.literal("stop")
+							.requires(source -> source.hasPermissionLevel(4))
+							.executes(context -> {
+								if (!rebootPending) {
+									context.getSource().sendError(Text.literal(getMsg("no_reboot_to_cancel")));
+									return 0;
+								}
+
+								// Отменяем выключение и сбрасываем счетчики
+								rebootPending = false;
+								rebootTicks = 0;
+								ticksSinceStart = 0;
+								lastTriggeredTime = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"));
+								processedWarnings.clear();
+
+								// Уведомляем сервер
+								context.getSource().getServer().getPlayerManager().broadcast(Text.literal(getMsg("cancel_announcement")), false);
+								return 1;
+							})
+					)
+
+					// MANUAL START: Запуск перезагрузки
 					.executes(context -> {
 						if (!context.getSource().hasPermissionLevel(4)) {
 							context.getSource().sendError(Text.literal(getMsg("no_permission")));
@@ -109,7 +132,7 @@ public class AutoRebootMod implements ModInitializer {
 		} else if (rebootMode.equalsIgnoreCase("Interval")) {
 			sb.append(getMsg("info_interval_val").replace("%s", String.valueOf(intervalMinutes)));
 			long remainingSec = (((long) intervalMinutes * 60 * 20) - ticksSinceStart) / 20;
-			sb.append(getMsg("info_remaining").replace("%s", formatTime(remainingSec)));
+			sb.append(getMsg("info_remaining").replace("%s", formatTime(Math.max(0, remainingSec))));
 		} else if (rebootMode.equalsIgnoreCase("Scheduled")) {
 			sb.append(getMsg("info_schedule_list").replace("%s", String.join(", ", scheduleTimes)));
 			sb.append(getMsg("info_remaining").replace("%s", formatTime(getSecondsUntilNextSchedule())));
@@ -130,7 +153,8 @@ public class AutoRebootMod implements ModInitializer {
 			try {
 				LocalTime target = LocalTime.parse(time, DateTimeFormatter.ofPattern("HH:mm"));
 				long diff = Duration.between(now, target).toSeconds();
-				if (diff <= 0) diff += 86400;
+				// Если diff < 0, значит время уже прошло, добавляем 24 часа. (Строго меньше нуля!)
+				if (diff < 0) diff += 86400;
 				if (diff < minDiff) minDiff = diff;
 			} catch (Exception ignored) {}
 		}
@@ -224,6 +248,8 @@ public class AutoRebootMod implements ModInitializer {
 			ch |= add(json, "kick_reason", "§6§lПЕРЕЗАГРУЗКА\n§7Сервер перезагружается. Вы сможете зайти через пару минут.");
 			ch |= add(json, "no_permission", "§cОшибка: Недостаточно прав.");
 			ch |= add(json, "reload_success", "§a[AutoReboot] Конфигурация успешно перезагружена!");
+			ch |= add(json, "cancel_announcement", "§c§l[!] §eПерезагрузка отменена администратором!");
+			ch |= add(json, "no_reboot_to_cancel", "§cНет активной перезагрузки для отмены.");
 			ch |= add(json, "server_prefix", "§6§l[Сервер] §e");
 			ch |= add(json, "info_header", "§8§m--------------------------------------\n§6§lИНФОРМАЦИЯ О ПЕРЕЗАГРУЗКЕ\n");
 			ch |= add(json, "info_footer", "\n§8§m--------------------------------------");
@@ -244,6 +270,8 @@ public class AutoRebootMod implements ModInitializer {
 			ch |= add(json, "kick_reason", "§6§lSERVER REBOOT\n§7Server is rebooting. You can join in a few minutes.");
 			ch |= add(json, "no_permission", "§cError: Insufficient permissions.");
 			ch |= add(json, "reload_success", "§a[AutoReboot] Configuration successfully reloaded!");
+			ch |= add(json, "cancel_announcement", "§c§l[!] §eServer reboot cancelled by administrator!");
+			ch |= add(json, "no_reboot_to_cancel", "§cNo active reboot to cancel.");
 			ch |= add(json, "server_prefix", "§6§l[Server] §e");
 			ch |= add(json, "info_header", "§8§m--------------------------------------\n§6§lREBOOT INFORMATION\n");
 			ch |= add(json, "info_footer", "\n§8§m--------------------------------------");
@@ -265,47 +293,37 @@ public class AutoRebootMod implements ModInitializer {
 
 	private void saveDefaultMainConfig(File f) throws Exception {
 		String content = """
-	{
-  		// The system language for messages (must match a file in the config folder, e.g., "en_us" or "ru_ru").
-  		// You can create your own translation file and specify its name here.
-  		"language": "en_us",
-		
-  		// Operation mode:
-  		// "Manual"    - Reboot only triggers when you manually type the /reboot command.
-  		// "Interval"  - Automatic restart every X minutes (defined in "interval_minutes").
-  		// "Scheduled" - Automatic restart at specific times of the day (defined in "schedule_times").
-  		"reboot_mode": "Manual",
-		
-  		// During the last 5 seconds, large countdown numbers (Titles) will appear on players' screens.
-  		"reboot_seconds": 15,
-		
-  		// Interval between reboots in minutes (used only if "reboot_mode" is set to "Interval").
-  		// Example: 360 minutes = the server will restart every 6 hours.
-  		"interval_minutes": 360,
-		
-  		// Specific times for automatic restarts (used only if "reboot_mode" is set to "Scheduled").
-  		// Time format: 24-hour "HH:mm". You can add as many values as needed, separated by commas.
-  		"schedule_times": [
-  		  "00:00",
-  		  "06:00",
-  		  "12:00",
-  		  "18:00"
-  		],
-		
-  		// A list of minutes before the reboot to send warning messages to the chat.
-  		// Example: if 10 is in the list, the server will announce the reboot 10 minutes in advance.
-  		"reboot_warning_minutes": [10, 5, 2, 1],
-		
-  		// The name of the script/file that will restart the server after it stops.
-  		// This file must be located in your server's root folder (where the 'mods' folder is).
-  		// For Windows: "start.bat", for Linux: "start.sh".
-  		"startup_script": "start.bat",
-		
-  		// Technical delay in seconds before the server stops and the script launches.
-  		// This gives the server enough time to safely save all world files and close databases.
-  		"script_delay": 3
-	}
-            """;
+        {
+           // The system language for messages (must match a file in the config folder, e.g., "en_us" or "ru_ru").
+           "language": "en_us",
+           
+           // Operation mode: "Manual", "Interval", "Scheduled"
+           "reboot_mode": "Manual",
+           
+           // During the last 5 seconds, large countdown numbers (Titles) will appear on players' screens.
+           "reboot_seconds": 15,
+           
+           // Interval between reboots in minutes (used only if "reboot_mode" is set to "Interval").
+           "interval_minutes": 360,
+           
+           // Specific times for automatic restarts (used only if "reboot_mode" is set to "Scheduled").
+           "schedule_times": [
+             "00:00",
+             "06:00",
+             "12:00",
+             "18:00"
+           ],
+           
+           // A list of minutes before the reboot to send warning messages to the chat.
+           "reboot_warning_minutes": [10, 5, 2, 1],
+           
+           // The name of the script/file that will restart the server after it stops.
+           "startup_script": "start.bat",
+           
+           // Technical delay in seconds before the server stops and the script launches.
+           "script_delay": 3
+        }
+        """;
 		try (FileWriter w = new FileWriter(f)) { w.write(content); }
 		loadAllConfigs();
 	}
@@ -318,13 +336,19 @@ public class AutoRebootMod implements ModInitializer {
 					? ((long) intervalMinutes * 60 * 20) - ticksSinceStart
 					: getSecondsUntilNextSchedule() * 20;
 
-			int remMin = (int) (remainingTicks / 1200);
-			if (warningMinutes.contains(remMin) && !processedWarnings.contains(remMin) && remMin > 0) {
-				server.getPlayerManager().broadcast(Text.literal(getMsg("warning_generic").replace("%s", String.valueOf(remMin))), false);
-				processedWarnings.add(remMin);
+			// Идеализированная проверка времени для оповещения без бага:
+			// Срабатывает только если осталось ровно кратное 1200 количество тиков (0 секунд).
+			if (remainingTicks > 0 && remainingTicks % 1200 == 0) {
+				int remMin = (int) (remainingTicks / 1200);
+				if (warningMinutes.contains(remMin) && !processedWarnings.contains(remMin)) {
+					server.getPlayerManager().broadcast(Text.literal(getMsg("warning_generic").replace("%s", String.valueOf(remMin))), false);
+					processedWarnings.add(remMin);
+				}
 			}
 
-			if (remMin > (warningMinutes.isEmpty() ? 0 : Collections.max(warningMinutes))) {
+			// Очищаем кэш предупреждений, если таймер сбросился и начал новый большой отсчет
+			int currentRemMin = (int) (remainingTicks / 1200);
+			if (!warningMinutes.isEmpty() && currentRemMin > Collections.max(warningMinutes)) {
 				processedWarnings.clear();
 			}
 
@@ -341,8 +365,8 @@ public class AutoRebootMod implements ModInitializer {
 				int s = rebootTicks / 20;
 				if (s <= 5) {
 					server.getPlayerManager().getPlayerList().forEach(p -> {
-						p.networkHandler.sendPacket(new TitleS2CPacket(Text.literal("§c" + s)));
 						p.networkHandler.sendPacket(new SubtitleS2CPacket(Text.literal(getMsg("countdown_subtitle"))));
+						p.networkHandler.sendPacket(new TitleS2CPacket(Text.literal("§c" + s)));
 					});
 				}
 				if (s % 30 == 0 || s == 15 || s <= 10) {
