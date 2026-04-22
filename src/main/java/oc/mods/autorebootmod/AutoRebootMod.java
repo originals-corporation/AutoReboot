@@ -265,21 +265,46 @@ public class AutoRebootMod implements ModInitializer {
 
 	private void saveDefaultMainConfig(File f) throws Exception {
 		String content = """
-            {
-              "language": "en_us",
-              "reboot_mode": "Manual",
-              "reboot_seconds": 15,
-              "interval_minutes": 360,
-              "schedule_times": [
-                "00:00",
-                "06:00",
-                "12:00",
-                "18:00"
-              ],
-              "reboot_warning_minutes": [10, 5, 2, 1],
-              "startup_script": "start.bat",
-              "script_delay": 3
-            }
+	{
+  		// The system language for messages (must match a file in the config folder, e.g., "en_us" or "ru_ru").
+  		// You can create your own translation file and specify its name here.
+  		"language": "en_us",
+		
+  		// Operation mode:
+  		// "Manual"    - Reboot only triggers when you manually type the /reboot command.
+  		// "Interval"  - Automatic restart every X minutes (defined in "interval_minutes").
+  		// "Scheduled" - Automatic restart at specific times of the day (defined in "schedule_times").
+  		"reboot_mode": "Manual",
+		
+  		// During the last 5 seconds, large countdown numbers (Titles) will appear on players' screens.
+  		"reboot_seconds": 15,
+		
+  		// Interval between reboots in minutes (used only if "reboot_mode" is set to "Interval").
+  		// Example: 360 minutes = the server will restart every 6 hours.
+  		"interval_minutes": 360,
+		
+  		// Specific times for automatic restarts (used only if "reboot_mode" is set to "Scheduled").
+  		// Time format: 24-hour "HH:mm". You can add as many values as needed, separated by commas.
+  		"schedule_times": [
+  		  "00:00",
+  		  "06:00",
+  		  "12:00",
+  		  "18:00"
+  		],
+		
+  		// A list of minutes before the reboot to send warning messages to the chat.
+  		// Example: if 10 is in the list, the server will announce the reboot 10 minutes in advance.
+  		"reboot_warning_minutes": [10, 5, 2, 1],
+		
+  		// The name of the script/file that will restart the server after it stops.
+  		// This file must be located in your server's root folder (where the 'mods' folder is).
+  		// For Windows: "start.bat", for Linux: "start.sh".
+  		"startup_script": "start.bat",
+		
+  		// Technical delay in seconds before the server stops and the script launches.
+  		// This gives the server enough time to safely save all world files and close databases.
+  		"script_delay": 3
+	}
             """;
 		try (FileWriter w = new FileWriter(f)) { w.write(content); }
 		loadAllConfigs();
